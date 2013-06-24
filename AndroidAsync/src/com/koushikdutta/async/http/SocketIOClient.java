@@ -1,7 +1,9 @@
 package com.koushikdutta.async.http;
 
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Map;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -10,6 +12,7 @@ import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.TextUtils;
+import android.util.Log;
 
 import com.koushikdutta.async.AsyncServer;
 import com.koushikdutta.async.NullDataCallback;
@@ -51,40 +54,59 @@ public class SocketIOClient {
             callback.onConnectCompleted(e, null);
         }
     }
-    
-    private void emitRaw(int type, String message) {
-        webSocket.send(String.format("%d:::%s", type, message));
 
+    private void emitRaw(int type,final String namespace, String message) {
+        webSocket.send(String.format("%d::%s:%s", type,namespace, message));
     }
 
     public void emit(String name, JSONArray args) {
+        emit("",name,args);
+    }
+
+    public void emit(final String namespace,String name, JSONArray args) {
         final JSONObject event = new JSONObject();
         try {
             event.put("name", name);
             event.put("args", args);
-            emitRaw(5, event.toString());
+            emitRaw(5,namespace, event.toString());
         }
         catch (Exception e) {
         }
     }
 
     public void emit(final String message) {
-        emitRaw(3, message);
+        emit("",message);
+    }
+
+    public void emit(final String namespace,final String message) {
+        emitRaw(3,namespace, message);
     }
     
     public void emit(final JSONObject jsonMessage) {
-        emitRaw(4, jsonMessage.toString());
+        emit("",jsonMessage);
+    }
+
+    public void emit(final String namespace,final JSONObject jsonMessage) {
+        emitRaw(4,namespace, jsonMessage.toString());
+    }
+
+    public void emitDisconect(final String namespace) {
+        emitRaw(0, namespace, "");
+    }
+
+    public void emitConnect(final String namespace) {
+        emitRaw(1, namespace, "");
     }
 
     private static class FutureImpl extends SimpleFuture<SocketIOClient> {
     }
-    
+
     public static class SocketIORequest extends AsyncHttpPost {
         String channel;
         public String getChannel() {
             return channel;
         }
-        
+
         public SocketIORequest(String uri) {
             super(Uri.parse(uri).buildUpon().encodedPath("/socket.io/1/").build().toString());
             channel = Uri.parse(uri).getPath();
@@ -92,15 +114,15 @@ public class SocketIOClient {
                 channel = null;
         }
     }
-    
+
     public static Future<SocketIOClient> connect(final AsyncHttpClient client, String uri, final SocketIOConnectCallback callback) {
         return connect(client, new SocketIORequest(uri), callback);
     }
-    
+
     public static Future<SocketIOClient> connect(final AsyncHttpClient client, final SocketIORequest request, final SocketIOConnectCallback callback) {
         final Handler handler = Looper.myLooper() == null ? null : new Handler();
         final FutureImpl ret = new FutureImpl();
-        
+
         // dont invoke onto main handler, as it is unnecessary until a session is ready or failed
         request.setHandler(null);
         // initiate a session
@@ -111,7 +133,7 @@ public class SocketIOClient {
                     reportError(ret, handler, callback, e);
                     return;
                 }
-                
+
                 try {
                     String[] parts = result.split(":");
                     String session = parts[0];
@@ -120,13 +142,13 @@ public class SocketIOClient {
                         heartbeat = Integer.parseInt(parts[1]) / 2 * 1000;
                     else
                         heartbeat = 0;
-                    
+
                     String transportsLine = parts[3];
                     String[] transports = transportsLine.split(",");
                     HashSet<String> set = new HashSet<String>(Arrays.asList(transports));
                     if (!set.contains("websocket"))
                         throw new Exception("websocket not supported");
-                    
+
                     final String sessionUrl = request.getUri().toString() + "websocket/" + session + "/";
                     final SocketIOClient socketio = new SocketIOClient(handler, heartbeat, sessionUrl, client);
                     socketio.reconnect(callback, ret);
@@ -138,10 +160,10 @@ public class SocketIOClient {
         });
 
         ret.setParent(cancel);
-        
+
         return ret;
     }
-    
+
     CompletedCallback closedCallback;
     public CompletedCallback getClosedCallback() {
         return closedCallback;
@@ -149,7 +171,7 @@ public class SocketIOClient {
     public void setClosedCallback(CompletedCallback callback) {
         closedCallback = callback;
     }
-    
+
     JSONCallback jsonCallback;
     public JSONCallback getJSONCallback() {
         return jsonCallback;
@@ -157,7 +179,7 @@ public class SocketIOClient {
     public void setJSONCallback(JSONCallback callback) {
         jsonCallback = callback;
     }
-    
+
     StringCallback stringCallback;
     public StringCallback getStringCallback() {
         return stringCallback;
@@ -165,7 +187,7 @@ public class SocketIOClient {
     public void setStringCallback(StringCallback callback) {
         stringCallback = callback;
     }
-    
+
     EventCallback eventCallback;
     public EventCallback getEventCallback() {
         return eventCallback;
@@ -177,17 +199,19 @@ public class SocketIOClient {
     String sessionUrl;
     WebSocket webSocket;
     AsyncHttpClient httpClient;
+    Map<String, SocketIOClientNamespace> namespaceMap;
     private SocketIOClient(Handler handler, int heartbeat, String sessionUrl, AsyncHttpClient httpCliet) {
         this.handler = handler;
         this.heartbeat = heartbeat;
         this.sessionUrl = sessionUrl;
         this.httpClient = httpCliet;
+        this.namespaceMap = new HashMap<String, SocketIOClientNamespace>();
     }
-    
+
     public boolean isConnected() {
         return connected && !disconnected && webSocket != null && webSocket.isOpen();
     }
-    
+
     public void disconnect() {
         webSocket.setStringCallback(null);
         webSocket.setDataCallback(null);
@@ -195,10 +219,17 @@ public class SocketIOClient {
         webSocket.close();
         webSocket = null;
         if (closedCallback != null) {
-        	closedCallback.onCompleted(null);
+            closedCallback.onCompleted(null);
         }
     }
-    
+
+    public SocketIOClientNamespace getOrCreateNamespace(final String namesapce) {
+        if(!namespaceMap.containsKey(namesapce)) {
+            namespaceMap.put(namesapce, new SocketIOClientNamespace(this,namesapce));
+        }
+        return namespaceMap.get(namesapce);
+    }
+
     private void reconnect(final SocketIOConnectCallback callback, final FutureImpl ret) {
         if (isConnected()) {
             httpClient.getServer().post(new Runnable() {
@@ -218,7 +249,7 @@ public class SocketIOClient {
                     reportError(ret, handler, callback, ex);
                     return;
                 }
-                
+
                 SocketIOClient.this.webSocket = webSocket;
                 attach(callback, ret);
             }
@@ -226,7 +257,7 @@ public class SocketIOClient {
         
         ret.setParent(cancel);
     }
-    
+
     private Future<SocketIOClient> reconnect(final SocketIOConnectCallback callback) {
         FutureImpl ret = new FutureImpl();
         reconnect(callback, ret);
@@ -286,19 +317,28 @@ public class SocketIOClient {
             @Override
             public void onStringAvailable(String message) {
                 try {
-//                    Log.d(TAG, "Message: " + message);
+                    //Log.d("SocketIOClient", "Message: " + message);
                     String[] parts = message.split(":", 4);
                     int code = Integer.parseInt(parts[0]);
+                    final String namespace = parts[2];
                     switch (code) {
                     case 0:
                         if (!connected)
                             throw new Exception("received disconnect before client connect");
                         
+                        if(namespaceMap.containsKey(namespace)) {
+                            SocketIOClientNamespace nspace = namespaceMap.get(namespace);
+                            if(!nspace.isConnected())
+                                throw new Exception("received disconnect for namespace before connect(namespace: " + namespace + ")");
+                            nspace.disconnect();
+                            break;
+                        }
+
                         disconnected = true;
 
                         // disconnect
                         webSocket.close();
-                        
+
                         if (closedCallback != null) {
                             if (handler != null) {
                                 AsyncServer.post(handler, new Runnable() {
@@ -313,18 +353,27 @@ public class SocketIOClient {
                             }
                         }
                         break;
-                    case 1:
-                        // connect
-                        if (connected)
-                            throw new Exception("received duplicate connect event");
+                    case 1: {
+                        if(namespace.equals("")) { 
+                            if (connected)
+                                throw new Exception("received duplicate connect event");
 
-                        if (!future.setComplete(SocketIOClient.this))
-                            throw new Exception("request canceled");
-                        
-                        connected = true;
-                        setupHeartbeat();
-                        callback.onConnectCompleted(null, SocketIOClient.this);
+                            if (!future.setComplete(SocketIOClient.this))
+                                throw new Exception("request canceled");
+
+                            connected = true;
+                            setupHeartbeat();
+                            callback.onConnectCompleted(null, SocketIOClient.this);
+                        } else if (namespaceMap.containsKey(namespace)) {
+                            SocketIOClientNamespace.ConnectCallback callback= namespaceMap.get(namespace).getConnectCallabck();
+                            if(callback != null){
+                                callback.onConnectCompleted(message);
+                            }
+                        } else {
+                            throw new Exception("recieved connect for unkonown namespace " + namespace);
+                        }
                         break;
+                    }
                     case 2:
                         // heartbeat
                         webSocket.send("2::");
@@ -332,7 +381,7 @@ public class SocketIOClient {
                     case 3: {
                         if (!connected)
                             throw new Exception("received message before client connect");
-                                                // message
+                        // message
                         final String messageId = parts[1];
                         final String dataString = parts[3];
                         
@@ -341,18 +390,38 @@ public class SocketIOClient {
                             webSocket.send(String.format("6:::%s", messageId));
                         }
 
-                        if (stringCallback != null) {
-                            if (handler != null) {
-                                AsyncServer.post(handler, new Runnable() {
-                                    @Override
-                                    public void run() {
-                                        stringCallback.onString(dataString);
-                                    }
-                                });
+                        if(namespace.equals("")) { 
+                            //global namespace
+                            if (stringCallback != null) {
+                                if (handler != null) {
+                                    AsyncServer.post(handler, new Runnable() {
+                                        @Override
+                                        public void run() {
+                                            stringCallback.onString(dataString);
+                                        }
+                                    });
+                                }
+                                else {
+                                    stringCallback.onString(dataString);
+                                }
                             }
-                            else {
-                                stringCallback.onString(dataString);
+                        } else if (namespaceMap.containsKey(namespace)) {
+                            final SocketIOClientNamespace.StringCallback callback = namespaceMap.get(namespace).getStringCallback();
+                            if (callback != null) {
+                                if (handler != null) {
+                                    AsyncServer.post(handler, new Runnable() {
+                                        @Override
+                                        public void run() {
+                                            callback.onString(dataString);
+                                        }
+                                    });
+                                }
+                                else {
+                                    callback.onString(dataString);
+                                }
                             }
+                        } else {
+                            throw new Exception("recieved string message for unkonown namespace " + namespace);
                         }
                         break;
                     }
@@ -371,25 +440,45 @@ public class SocketIOClient {
                             webSocket.send(String.format("6:::%s", messageId));
                         }
 
-                        if (jsonCallback != null) {
-                            if (handler != null) {
-                                AsyncServer.post(handler, new Runnable() {
-                                    @Override
-                                    public void run() {
-                                        jsonCallback.onJSON(jsonMessage);
-                                    }
-                                });
+                        if(namespace.equals("")) { 
+                            //global namespace
+                            if (jsonCallback != null) {
+                                if (handler != null) {
+                                    AsyncServer.post(handler, new Runnable() {
+                                        @Override
+                                        public void run() {
+                                            jsonCallback.onJSON(jsonMessage);
+                                        }
+                                    });
+                                }
+                                else {
+                                    jsonCallback.onJSON(jsonMessage);
+                                }
                             }
-                            else {
-                                jsonCallback.onJSON(jsonMessage);
+                        } else if (namespaceMap.containsKey(namespace)) {
+                            final SocketIOClientNamespace.JSONCallback callback = namespaceMap.get(namespace).getJSONCallback();
+                            if (callback != null) {
+                                if (handler != null) {
+                                    AsyncServer.post(handler, new Runnable() {
+                                        @Override
+                                        public void run() {
+                                            callback.onJSON(jsonMessage);
+                                        }
+                                    });
+                                }
+                                else {
+                                    callback.onJSON(jsonMessage);
+                                }
                             }
+                        } else {
+                            throw new Exception("recieved json message for unkonown namespace " + namespace);
                         }
                         break;
                     }
                     case 5: {
                         if (!connected)
                             throw new Exception("received message before client connect");
-                        
+
                         final String messageId = parts[1];
                         final String dataString = parts[3];
                         JSONObject data = new JSONObject(dataString);
@@ -401,18 +490,38 @@ public class SocketIOClient {
                             webSocket.send(String.format("6:::%s", messageId));
                         }
 
-                        if (eventCallback != null) {
-                            if (handler != null) {
-                                AsyncServer.post(handler, new Runnable() {
-                                    @Override
-                                    public void run() {
-                                        eventCallback.onEvent(event, args);
-                                    }
-                                });
+                        if(namespace.equals("")) {
+                            //global namespace
+                            if (eventCallback != null) {
+                                if (handler != null) {
+                                    AsyncServer.post(handler, new Runnable() {
+                                        @Override
+                                        public void run() {
+                                            eventCallback.onEvent(event, args);
+                                        }
+                                    });
+                                }
+                                else {
+                                    eventCallback.onEvent(event, args);
+                                }
                             }
-                            else {
-                                eventCallback.onEvent(event, args);
+                        } else if (namespaceMap.containsKey(namespace)) {
+                            final SocketIOClientNamespace.EventCallback callback = namespaceMap.get(namespace).getEventCallback();
+                            if (callback  != null) {
+                                if (handler != null) {
+                                    AsyncServer.post(handler, new Runnable() {
+                                        @Override
+                                        public void run() {
+                                            callback.onEvent(event, args);
+                                        }
+                                    });
+                                }
+                                else {
+                                    callback.onEvent(event, args);
+                                }
                             }
+                        } else {
+                            throw new Exception("recieved json message for unkonown namespace " + namespace);
                         }
                         break;
                     }
